@@ -101,15 +101,31 @@ class ASTNode:
         # some tuning
         # 1. in some cases self.params['type'] may be a string containing the path with line/col numbers, for ex:
         # '(lambda at /home/abuild/rpmbuild/BUILD/capi-context-1.0.6/src/trigger/CustomTemplate.cpp:295:3)'
-        # just remove the line/col numbers
         t = self.params.get('type', None)
-        if t:
-            self.params['type'] = re.sub(r':[0-9]+:[0-9]+', '', t)
+        # todo:
+        # just remove the line/col numbers
+        # if t:
+        #     self.params['type'] = re.sub(r':[0-9]+:[0-9]+', '', t)
+        # just remove the whole string
+        if t and '/home/abuild/rpmbuild' in t:
+            self.params['type'] = ''
         # 2. can't explain
-        k = self.params.get('kind', '')
-        if (k == 'IntegerLiteral' or k == 'StringLiteral') and \
-                self.params.get('valueCategory', '') == 'rvalue' and self.params.get('value', None):
-            self.params['value'] = ''
+        v = self.params.get('value', None)
+        if v:
+            k = self.params.get('kind', '')
+            vc = self.params.get('valueCategory', '')
+            if k == 'IntegerLiteral':
+                if vc == 'rvalue':
+                    self.params['value'] = ''
+            elif k == 'StringLiteral':
+                if vc == 'rvalue':
+                    self.params['value'] = ''
+                elif vc == 'lvalue' and '/home/abuild/rpmbuild' in v:
+                    self.params['value'] = ''
+        # k = self.params.get('kind', '')
+        # if (k == 'IntegerLiteral' or k == 'StringLiteral') and \
+        #         self.params.get('valueCategory', '') == 'rvalue' and self.params.get('value', None):
+        #     self.params['value'] = ''
 
     def __str__(self):
         return self.__print()
@@ -218,9 +234,9 @@ class AST:
 
 
 def main():
-    ast1 = AST('/home/iuriim/tmp/qwe/http/1')
+    ast1 = AST('/home/iuriim/tmp/qwe/1')
     # print(f'============= AST1\n{ast1}')
-    ast2 = AST('/home/iuriim/tmp/qwe/http/2')
+    ast2 = AST('/home/iuriim/tmp/qwe/2')
     # # print(f'============= AST1\n{ast2}')
 
     nodes1 = ast1.find_methods()
@@ -231,11 +247,11 @@ def main():
         if node1 not in nodes2:
             print(f'ZZZ ======================= {node1}')
 
-    # nodes1 = ast1.find_methods(display_name='http_session_destroy', mangled_name='http_session_destroy')
+    # nodes1 = ast1.find_methods(display_name='account_connect', mangled_name='account_connect')
     # print(f'ZZZ =========== nodes1 : {len(nodes1)}\n')
     # for n in nodes1:
     #     print(f'{n}')
-    # nodes2 = ast2.find_methods(display_name='http_session_destroy', mangled_name='http_session_destroy')
+    # nodes2 = ast2.find_methods(display_name='account_connect', mangled_name='account_connect')
     # print(f'ZZZ =========== nodes2 : {len(nodes2)}\n')
     # for n in nodes2:
     #     print(f'{n}')
