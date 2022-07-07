@@ -56,9 +56,25 @@ class ASTException(Exception):
 # decl
 
 class ASTNode:
+
+    # nodes to be skipped
+    # 1. comments nodes
+    # Kind of comment:
+    #     FullComment, ParagraphComment, TextComment,
+    #     InlineCommandComment, HTMLStartTagComment, HTMLEndTagComment,
+    #     BlockCommandComment, ParamCommandComment,
+    #     TParamCommandComment, VerbatimBlockComment,
+    #     VerbatimBlockLineComment, VerbatimLineComment
+    skipped_nodes = ['FullComment', 'ParagraphComment', 'TextComment', 'InlineCommandComment', 'HTMLStartTagComment',
+                     'HTMLEndTagComment', 'BlockCommandComment', 'ParamCommandComment', 'TParamCommandComment',
+                     'VerbatimBlockComment', 'VerbatimBlockLineComment', 'VerbatimLineComment']
+
+    # keys that are needed to compare nodes
     used_node_keys = ['id', 'kind', 'name', 'mangledName', 'isUsed', 'type', 'valueCategory', 'value', 'opcode',
                       'castKind', 'isReferenced', 'referencedDecl', 'inner']
-    forbidden_node_keys = ['id', 'loc', 'range']
+
+    # these keys do not make sense to compare
+    forbidden_node_keys = ['loc', 'range']
     # access, storageClass, inline,
 
     def __init__(self, file_pathname: str, node: dict):
@@ -141,7 +157,8 @@ class ASTNode:
     def __parse(file_pathname: str, nodes: list):
         res = []
         for node in nodes:
-            res.append(ASTNode(file_pathname, node))
+            if node.get('kind', '') not in ASTNode.skipped_nodes:
+                res.append(ASTNode(file_pathname, node))
         return res
 
     def __print(self, prefix='|'):
@@ -201,9 +218,9 @@ class AST:
 
 
 def main():
-    ast1 = AST('/home/iuriim/tmp/qwe/context/1')
+    ast1 = AST('/home/iuriim/tmp/qwe/http/1')
     # print(f'============= AST1\n{ast1}')
-    ast2 = AST('/home/iuriim/tmp/qwe/context/2')
+    ast2 = AST('/home/iuriim/tmp/qwe/http/2')
     # # print(f'============= AST1\n{ast2}')
 
     nodes1 = ast1.find_methods()
@@ -214,20 +231,17 @@ def main():
         if node1 not in nodes2:
             print(f'ZZZ ======================= {node1}')
 
-
-    # nodes1 = ast1.find_methods(display_name='__is_valid_pkg_id')
+    # nodes1 = ast1.find_methods(display_name='http_session_destroy', mangled_name='http_session_destroy')
     # print(f'ZZZ =========== nodes1 : {len(nodes1)}\n')
-    # # for n1 in nodes1:
-    # #     print(f'ZZZ =========== n1 : \n{n1}\n')
-    # # print(f'ZZZ =========== node1 : \n{nodes1[0]}\n')
-    # nodes2 = ast2.find_methods(display_name='__is_valid_pkg_id')
+    # for n in nodes1:
+    #     print(f'{n}')
+    # nodes2 = ast2.find_methods(display_name='http_session_destroy', mangled_name='http_session_destroy')
     # print(f'ZZZ =========== nodes2 : {len(nodes2)}\n')
-    # # for n2 in nodes2:
-    # #     print(f'ZZZ =========== n2 : \n{n2}\n')
-    # # print(f'ZZZ =========== node2 : \n{nodes2[0]}\n')
-    # # for node1 in nodes1:
-    # #     if node1 not in nodes2:
-    # #         print(f'ZZZ ======================= \n{node1}\n')
+    # for n in nodes2:
+    #     print(f'{n}')
+
+
+
 
 
 
