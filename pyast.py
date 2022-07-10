@@ -130,7 +130,7 @@ class ASTNode:
                 match = False
             if match:
                 res.append(self)
-        elif kind in ['TranslationUnitDecl', 'NamespaceDecl']:
+        elif kind in ['TranslationUnitDecl', 'NamespaceDecl', 'CXXRecordDecl']:
             # CXCursor_TranslationUnit -> TranslationUnitDecl
             # CXCursor_Namespace -> NamespaceDecl
             # CXCursor_ClassDecl
@@ -237,36 +237,39 @@ def public_api(report_file_pathname: str) -> dict:
 
 
 
-def is_node_affected(node: ASTNode, methods: list, modified_methods_ids: set) -> bool:
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}')
+def is_node_affected(node: ASTNode, existing_methods: list, modified_methods_ids: set) -> bool:
+    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}, {node.display_name}, {node.mangled_name}')
 
     if node.uid in modified_methods_ids:
         print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {node.uid}, {node.display_name}, {node.mangled_name}')
         return True
 
-    method = [m for m in methods if m.uid == node.uid]
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(method)}')
-    assert len(method) == 1
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method[0].uid}, {method[0].display_name}, {method[0].mangled_name}')
+    methods = [m for m in existing_methods if m.uid == node.uid]
+    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
+    for method in methods:
+        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
+        if method.display_name == '' or method.mangled_name == '':
+            continue
 
-    nodes = [n for n in methods if n.display_name == method[0].display_name and n.mangled_name == method[0].mangled_name]
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
+        nodes = [n for n in existing_methods if n.display_name == method.display_name and n.mangled_name == method.mangled_name]
+        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
 
-    for nd in nodes:
-        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
-        referenced_nodes = nd.find_referenced_methods()
-        for n in referenced_nodes:
-            # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 6: {n.uid}, {n.display_name}, {n.mangled_name}')
-            if is_node_affected(n, methods, modified_methods_ids):
-                print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 2 {n.uid}, {n.display_name}, {n.mangled_name}')
-                return True
+        for nd in nodes:
+            # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+            referenced_nodes = nd.find_referenced_methods()
+            for n in referenced_nodes:
+                # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 6: {n.uid}, {n.display_name}, {n.mangled_name}')
+                if is_node_affected(n, existing_methods, modified_methods_ids):
+                    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 2 {n.uid}, {n.display_name}, {n.mangled_name}')
+                    return True
+
     return False
 
 
-def is_method_affected(method_name: str, methods: list, modified_methods_ids: set) -> bool:
-    method_nodes = [n for n in methods if n.display_name == method_name and n.mangled_name == method_name]
+def is_method_affected(method_name: str, existing_methods: list, modified_methods_ids: set) -> bool:
+    method_nodes = [n for n in existing_methods if n.display_name == method_name and n.mangled_name == method_name]
     for n in method_nodes:
-        if is_node_affected(n, methods, modified_methods_ids):
+        if is_node_affected(n, existing_methods, modified_methods_ids):
             return True
     return False
 
@@ -276,7 +279,8 @@ def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to
 
     # find public APIs (linked to fuzzers)
     pub_api = public_api(report_file_pathname)
-    # print(f'ZZZ === API: {api}\n')
+    for k, v in pub_api.items():
+        print(f'ZZZ === API: {k} : {v}\n')
 
     # build two ASTs for comparison
     ast1 = AST(path_to_ast_files1)
@@ -298,11 +302,12 @@ def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to
 
     # checks is public API affected and get linked fuzzers
     for api, fuzzers in pub_api.items():
+        print(f'ZZZ === CHECK METHOD: {api}')
         if is_method_affected(api, methods1, modified_methods_ids):
-            print(f'ZZZ === METHOD {api} AFFECTED')
+            print(f'ZZZ === METHOD AFFECTED: {api}')
             res.update(fuzzers)
         else:
-            print(f'ZZZ === METHOD {api} NOT AFFECTED')
+            print(f'ZZZ === METHOD NOT AFFECTED: {api}')
 
     return res
 
