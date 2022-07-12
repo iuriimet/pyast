@@ -24,6 +24,9 @@ class ASTNode:
                      'HTMLEndTagComment', 'BlockCommandComment', 'ParamCommandComment', 'TParamCommandComment',
                      'VerbatimBlockComment', 'VerbatimBlockLineComment', 'VerbatimLineComment']
 
+    # method nodes
+    method_nodes = ['FunctionDecl', 'CXXMethodDecl']
+
     # keys that are needed to compare nodes
     used_node_keys = ['id', 'kind', 'name', 'mangledName', 'isUsed', 'type', 'valueCategory', 'value', 'opcode',
                       'castKind', 'isReferenced', 'referencedDecl', 'inner']
@@ -122,7 +125,7 @@ class ASTNode:
         res = []
 
         kind = self.kind
-        if kind in ['FunctionDecl', 'CXXMethodDecl']:
+        if kind in ASTNode.method_nodes:
             match = True
             if display_name and display_name != self.display_name:
                 match = False
@@ -143,7 +146,7 @@ class ASTNode:
     def find_referenced_methods(self) -> list:
         res = []
         ref_node = self._params.get('referencedDecl', None)
-        if ref_node and ref_node.kind in ['FunctionDecl', 'CXXMethodDecl']:
+        if ref_node and ref_node.kind in ASTNode.method_nodes:
             res.append(ref_node)
         for leaf in self._leaves:
             res.extend(leaf.find_referenced_methods())
@@ -186,11 +189,14 @@ class AST:
         self.project_pathname = project_pathname
         self.tu = []
         for ast in AST.__ast_files(project_pathname):
-            with open(ast) as f:
-                try:
+            try:
+                with open(ast, encoding="UTF-8") as f:
                     self.tu.append(ASTTu(ast, json.load(f)))
-                except ASTException as e:
-                    print(f"Can't parse ast {ast} : {e}")
+            except ASTException as e:
+                print(f"Can't parse ast {ast} : {e}")
+            except Exception as e:
+                print(f"Can't parse ast {ast} : {e}")
+                raise
 
     def __str__(self):
         res = f'{self.project_pathname}:\n'
@@ -238,9 +244,9 @@ def public_api(report_file_pathname: str) -> dict:
 
 
 def is_node_affected(node: ASTNode, existing_methods: list, modified_methods_ids: set) -> bool:
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}, {node.display_name}, {node.mangled_name}')
+    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}, {node.display_name}, {node.mangled_name}')
     methods = [m for m in existing_methods if m.uid == node.uid]
-    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
+    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
     assert len(methods) > 0
     for method in methods:
         # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
@@ -275,6 +281,14 @@ def is_method_affected(method_name: str, existing_methods: list, modified_method
 def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to_ast_files2: str) -> set:
     res = set()
 
+    # ZZZ
+    aaa = AST(path_to_ast_files1)
+    mmm = aaa.find_methods()
+    print(f'ZZZ === methods1 : {len(mmm)}\n')
+    return res
+
+
+
     # find public APIs (linked to fuzzers)
     pub_api = public_api(report_file_pathname)
     for k, v in pub_api.items():
@@ -285,6 +299,8 @@ def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to
     # print(f'ZZZ === AST1\n{ast1}\n')
     ast2 = AST(path_to_ast_files2)
     # print(f'ZZZ === AST2\n{ast2}\n')
+
+    print('ZZZ ==================================== BEGIN')
 
     # find modified methods
     modified_methods_ids = set()
