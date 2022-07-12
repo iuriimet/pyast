@@ -239,28 +239,26 @@ def public_api(report_file_pathname: str) -> dict:
 
 def is_node_affected(node: ASTNode, existing_methods: list, modified_methods_ids: set) -> bool:
     # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}, {node.display_name}, {node.mangled_name}')
-
-    if node.uid in modified_methods_ids:
-        print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {node.uid}, {node.display_name}, {node.mangled_name}')
-        return True
-
     methods = [m for m in existing_methods if m.uid == node.uid]
     # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
+    assert len(methods) > 0
     for method in methods:
         # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
-        if method.display_name == '' or method.mangled_name == '':
-            continue
-
+        assert method.display_name != ''
+        assert method.mangled_name != ''
         nodes = [n for n in existing_methods if n.display_name == method.display_name and n.mangled_name == method.mangled_name]
         # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
-
         for nd in nodes:
             # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+            if nd.uid in modified_methods_ids:
+                print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+                return True
+
             referenced_nodes = nd.find_referenced_methods()
             for n in referenced_nodes:
                 # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 6: {n.uid}, {n.display_name}, {n.mangled_name}')
                 if is_node_affected(n, existing_methods, modified_methods_ids):
-                    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 2 {n.uid}, {n.display_name}, {n.mangled_name}')
+                    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 3 {n.uid}, {n.display_name}, {n.mangled_name}')
                     return True
 
     return False
