@@ -4,6 +4,7 @@
 import os
 import re
 import json
+import copy
 
 
 class ASTException(Exception):
@@ -14,7 +15,7 @@ class ASTNode:
 
     # nodes to be skipped
     # 1. comments nodes
-    # Kind of comment:
+    # Kind of comments:
     #     FullComment, ParagraphComment, TextComment,
     #     InlineCommandComment, HTMLStartTagComment, HTMLEndTagComment,
     #     BlockCommandComment, ParamCommandComment,
@@ -25,20 +26,22 @@ class ASTNode:
                      'VerbatimBlockComment', 'VerbatimBlockLineComment', 'VerbatimLineComment']
 
     # method nodes
-    method_nodes = ['FunctionDecl', 'CXXMethodDecl']
+    # CXXConstructorDecl, CXXDestructorDecl
+    method_nodes = ['FunctionDecl', 'CXXConstructorDecl', 'CXXDestructorDecl', 'CXXMethodDecl', 'FunctionTemplateDecl']
 
     # keys that are needed to compare nodes
     used_node_keys = ['id', 'kind', 'name', 'mangledName', 'isUsed', 'type', 'valueCategory', 'value', 'opcode',
-                      'castKind', 'isReferenced', 'referencedDecl', 'inner']
+                      'castKind', 'isReferenced', 'referencedDecl', 'referencedMemberDecl', 'inner']
 
     # these keys do not make sense to compare
     forbidden_node_keys = ['loc', 'range']
-    # access, storageClass, inline,
 
     def __init__(self, file_pathname: str, node: dict):
         self.file_pathname = file_pathname
         self._id = ''
         self._params = {}
+        # parameters that cannot be compared
+        self._params_ex = {}
         self._leaves = []
 
         for k, v in node.items():
@@ -46,9 +49,11 @@ class ASTNode:
                 if k == 'id':
                     self._id = v
                 elif k == 'type':
-                    self._params['type'] = v.get('qualType', '')
+                    self._params[k] = v.get('qualType', '')
                 elif k == 'referencedDecl':
-                    self._params['referencedDecl'] = ASTNode(file_pathname, v)
+                    self._params[k] = ASTNode(file_pathname, v)
+                elif k == 'referencedMemberDecl':
+                    self._params_ex[k] = v
                 elif k == 'inner':
                     self._leaves = ASTNode.__parse(file_pathname, v)
                 else:
@@ -80,10 +85,6 @@ class ASTNode:
                     self._params['value'] = ''
                 elif vc == 'lvalue' and '/home/abuild/rpmbuild' in v:
                     self._params['value'] = ''
-        # k = self.params.get('kind', '')
-        # if (k == 'IntegerLiteral' or k == 'StringLiteral') and \
-        #         self.params.get('valueCategory', '') == 'rvalue' and self.params.get('value', None):
-        #     self.params['value'] = ''
 
     @property
     def uid(self):
@@ -133,23 +134,33 @@ class ASTNode:
                 match = False
             if match:
                 res.append(self)
-        elif kind in ['TranslationUnitDecl', 'NamespaceDecl', 'CXXRecordDecl']:
-            # CXCursor_TranslationUnit -> TranslationUnitDecl
-            # CXCursor_Namespace -> NamespaceDecl
-            # CXCursor_ClassDecl
-            # CXCursor_StmtExpr -> StmtExpr
+        # elif kind in ['TranslationUnitDecl', 'NamespaceDecl', 'CXXRecordDecl']:
+        #     # CXCursor_TranslationUnit -> TranslationUnitDecl
+        #     # CXCursor_Namespace -> NamespaceDecl
+        #     # CXCursor_ClassDecl
+        #     # CXCursor_StmtExpr -> StmtExpr
+        #     for leaf in self._leaves:
+        #         res.extend(leaf.find_methods(display_name, mangled_name))
+        else:
             for leaf in self._leaves:
                 res.extend(leaf.find_methods(display_name, mangled_name))
 
         return res
 
-    def find_referenced_methods(self) -> list:
-        res = []
+    def find_referenced_methods(self) -> set:
+        res = set()
+
         ref_node = self._params.get('referencedDecl', None)
         if ref_node and ref_node.kind in ASTNode.method_nodes:
-            res.append(ref_node)
+            res.add(ref_node.uid)
+
+        ref_member_node = self._params_ex.get('referencedMemberDecl', None)
+        if ref_member_node:
+            res.add(ref_member_node)
+
         for leaf in self._leaves:
-            res.extend(leaf.find_referenced_methods())
+            res.update(leaf.find_referenced_methods())
+
         return res
 
     @staticmethod
@@ -163,6 +174,8 @@ class ASTNode:
     def __print(self, prefix='|'):
         res = f'{prefix} ASTNode(id: {self._id}, '
         for k, v in self._params.items():
+            res += f'{k} : {v}, '
+        for k, v in self._params_ex.items():
             res += f'{k} : {v}, '
         res += ')\n'
         for leaf in self._leaves:
@@ -218,177 +231,231 @@ class AST:
         return res
 
 
+class AffectedFuzzersFinder:
 
+    STATUS_AFFECTED = 'AFFECTED'
+    STATUS_NOT_AFFECTED = 'NOT AFFECTED'
+    STATUS_IN_PROGRESS = 'IN PROGRESS'
 
-def public_api(report_file_pathname: str) -> dict:
-    res = dict()
-    with open(report_file_pathname) as f:
-        report = json.load(f)
-        for api in report.get('API', []):
-            if api.get('Status', '') != 'GENERATED' or api.get('FuzzerBuildStatus', '') != 'SUCCESS':
-                continue
-            name = api.get('Name', None)
-            if not name:
-                continue
-            fuzzers = []
-            for it in api.get('StatusList', []):
-                if it.get('Status', '') != 'GENERATED':
-                    continue
-                fuzzer = it.get('StatusFromUT', None)
-                if fuzzer:
-                    fuzzers.append(f'{fuzzer}_ftgfuzz')
-            res.setdefault(name, set()).update(fuzzers)
-    return res
+    def __init__(self, report_file_pathname: str, path_to_ast_files1: str, path_to_ast_files2: str):
+        # find public APIs (linked to fuzzers)
+        self._public_api = AffectedFuzzersFinder.__public_api(report_file_pathname)
+        for k, v in self._public_api.items():
+            print(f'ZZZ === API: {k} : {v}\n')
 
 
 
+        # ast = AST(path_to_ast_files1)
+        # print(f'ZZZ === AST: {ast}\n\n\n')
 
-def is_node_affected(node: ASTNode, existing_methods: list, modified_methods_ids: set) -> bool:
-    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node.uid}, {node.display_name}, {node.mangled_name}')
-    methods = [m for m in existing_methods if m.uid == node.uid]
-    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
-    assert len(methods) > 0
-    for method in methods:
-        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
-        assert method.display_name != ''
-        assert method.mangled_name != ''
-        nodes = [n for n in existing_methods if n.display_name == method.display_name and n.mangled_name == method.mangled_name]
-        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
-        for nd in nodes:
-            # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
-            if nd.uid in modified_methods_ids:
-                print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+
+        # build ASTs and find existing methods
+        self._existing_methods1 = AST(path_to_ast_files1).find_methods()
+        print(f'ZZZ === _existing_methods1 : {len(self._existing_methods1)}\n')
+        self._existing_methods2 = AST(path_to_ast_files2).find_methods()
+        print(f'ZZZ === _existing_methods2 : {len(self._existing_methods2)}\n')
+
+
+        # # ZZZ
+        # zzz = [z for z in self._existing_methods1 if z.display_name == 'hookRel']
+        # for z in zzz:
+        #     print(f'ZZZ ================================= HOOK_REL: {z}\n')
+
+
+        # find modified methods
+        self._modified_methods_ids = AffectedFuzzersFinder.__find_modified_methods_ids(self._existing_methods1, self._existing_methods2)
+        print(f'ZZZ === modified_methods_ids : {self._modified_methods_ids}\n')
+
+        self._checked_methods = dict()
+        self._checked_nodes = dict()
+
+    def __call__(self) -> set:
+        res = set()
+        # checks is public API affected and get linked fuzzers
+        for api, fuzzers in self._public_api.items():
+            print(f'ZZZ === CHECK METHOD: {api}')
+            if self._checked_methods.get(api, None) is None:
+                self._checked_methods[api] = self.__is_method_affected(api)
+            if self._checked_methods.get(api, False):
+                print(f'ZZZ === METHOD AFFECTED: {api}')
+                res.update(fuzzers)
+        return res
+
+    def __is_method_affected(self, method_name: str) -> bool:
+        # nodes_ids = {n.uid for n in self._existing_methods1
+        #              if n.display_name == method_name and n.mangled_name == method_name}
+        # for nid in nodes_ids:
+        #     if self.__is_node_affected(nid):
+        #         return True
+        # return False
+        return self.__is_nodes_affected({n.uid for n in self._existing_methods1
+                                         if n.display_name == method_name and n.mangled_name == method_name})
+
+    def __is_nodes_affected(self, nodes_ids: set) -> bool:
+        for nid in nodes_ids:
+            # print(f'ZZZ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1 __is_nodes_affected 1: {nid}')
+            if self._checked_nodes.get(nid, None) is None:
+                # print(f'ZZZ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1 __is_nodes_affected 2: {nid}')
+                self._checked_nodes[nid] = AffectedFuzzersFinder.STATUS_IN_PROGRESS
+                self._checked_nodes[nid] = AffectedFuzzersFinder.STATUS_AFFECTED \
+                    if self.__is_node_affected(nid) else AffectedFuzzersFinder.STATUS_NOT_AFFECTED
+                # print(f'ZZZ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1 __is_nodes_affected 3: {nid}: {self._checked_nodes[nid]}')
+            if self._checked_nodes.get(nid) == AffectedFuzzersFinder.STATUS_AFFECTED:
+                # print(f'ZZZ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! __is_nodes_affected OKK: {nid}')
                 return True
+        # print(f'ZZZ !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! __is_nodes_affected ERR')
+        return False
 
-            referenced_nodes = nd.find_referenced_methods()
-            for n in referenced_nodes:
-                # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 6: {n.uid}, {n.display_name}, {n.mangled_name}')
-                if is_node_affected(n, existing_methods, modified_methods_ids):
-                    print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 3 {n.uid}, {n.display_name}, {n.mangled_name}')
+    def __is_node_affected(self, node_id: str) -> bool:
+        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node_id}')
+        methods = [m for m in self._existing_methods1 if m.uid == node_id]
+        # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
+        for method in methods:
+            # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
+            if method.display_name == '' or method.mangled_name == '':
+                continue
+
+            nodes = [n for n in self._existing_methods1 if
+                     n.display_name == method.display_name and n.mangled_name == method.mangled_name]
+            # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
+
+            for nd in nodes:
+                # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+                if nd.uid in self._modified_methods_ids:
+                    # print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
                     return True
 
-    return False
+                # referenced_nodes_ids = nd.find_referenced_methods()
+                # for nid in referenced_nodes_ids:
+                #
+                #     status = self._checked_nodes.get(nid, None)
+                #     if status:
+                #         if status == AffectedFuzzersFinder.STATUS_AFFECTED:
+                #             print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 2: {nid}')
+                #             return True
+                #     else:
+                #         self._checked_nodes[nid] = AffectedFuzzersFinder.STATUS_IN_PROGRESS
+                #         if self.__is_node_affected(nid):
+                #             print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 3: {nid}')
+                #             self._checked_nodes[nid] = AffectedFuzzersFinder.STATUS_AFFECTED
+                #             return True
+                #         else:
+                #             self._checked_nodes[nid] = AffectedFuzzersFinder.STATUS_NOT_AFFECTED
+                if self.__is_nodes_affected(nd.find_referenced_methods()):
+                    return True
 
+        return False
 
-def is_method_affected(method_name: str, existing_methods: list, modified_methods_ids: set) -> bool:
-    method_nodes = [n for n in existing_methods if n.display_name == method_name and n.mangled_name == method_name]
-    for n in method_nodes:
-        if is_node_affected(n, existing_methods, modified_methods_ids):
-            return True
-    return False
+    @staticmethod
+    def __public_api(report_file_pathname: str) -> dict:
+        res = dict()
+        with open(report_file_pathname) as f:
+            report = json.load(f)
+            for api in report.get('API', []):
+                if api.get('Status', '') != 'GENERATED' or api.get('FuzzerBuildStatus', '') != 'SUCCESS':
+                    continue
+                name = api.get('Name', None)
+                if not name:
+                    continue
+                fuzzers = []
+                for it in api.get('StatusList', []):
+                    if it.get('Status', '') != 'GENERATED':
+                        continue
+                    fuzzer = it.get('StatusFromUT', None)
+                    if fuzzer:
+                        fuzzers.append(f'{fuzzer}_ftgfuzz')
+                res.setdefault(name, set()).update(fuzzers)
+        return res
 
-
-def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to_ast_files2: str) -> set:
-    res = set()
-
-    # ZZZ
-    aaa = AST(path_to_ast_files1)
-    mmm = aaa.find_methods()
-    print(f'ZZZ === methods1 : {len(mmm)}\n')
-    return res
-
-
-
-    # find public APIs (linked to fuzzers)
-    pub_api = public_api(report_file_pathname)
-    for k, v in pub_api.items():
-        print(f'ZZZ === API: {k} : {v}\n')
-
-    # build two ASTs for comparison
-    ast1 = AST(path_to_ast_files1)
-    # print(f'ZZZ === AST1\n{ast1}\n')
-    ast2 = AST(path_to_ast_files2)
-    # print(f'ZZZ === AST2\n{ast2}\n')
-
-    print('ZZZ ==================================== BEGIN')
-
-    # find modified methods
-    modified_methods_ids = set()
-    methods1 = ast1.find_methods()
-    print(f'ZZZ === methods1 : {len(methods1)}\n')
-    methods2 = ast2.find_methods()
-    print(f'ZZZ === methods2 : {len(methods2)}\n')
-    for m in methods1:
-        if m not in methods2:
-            print(f'ZZZ === modified method : {m}\n')
-            modified_methods_ids.add(m.uid)
-    print(f'ZZZ === modified_methods_ids : {modified_methods_ids}\n')
-
-    # checks is public API affected and get linked fuzzers
-    for api, fuzzers in pub_api.items():
-        print(f'ZZZ === CHECK METHOD: {api}')
-        if is_method_affected(api, methods1, modified_methods_ids):
-            print(f'ZZZ === METHOD AFFECTED: {api}')
-            res.update(fuzzers)
-        else:
-            print(f'ZZZ === METHOD NOT AFFECTED: {api}')
-
-    return res
-
-
-
+    @staticmethod
+    def __find_modified_methods_ids(methods1: list, methods2: list) -> set:
+        res = set()
+        for m in methods1:
+            if m not in methods2:
+                print(f'ZZZ === method MODIFIED : {m}\n')
+                res.add(m.uid)
+        return res
 
 
 def main():
-    fuzzers = affected_fuzzers('/home/iuriim/tmp/qwe/fuzzGen_Report.json', '/home/iuriim/tmp/qwe/1', '/home/iuriim/tmp/qwe/2')
+    fuzzers = AffectedFuzzersFinder('/home/iuriim/tmp/qwe/fuzzGen_Report.json', '/home/iuriim/tmp/qwe/1', '/home/iuriim/tmp/qwe/2')()
     print(f'ZZZ === AFFECTED FUZZERS: {fuzzers}')
-
-
-
-    # api = public_api('/home/iuriim/tmp/qwe/fuzzGen_Report.json')
-    # print(f'ZZZ === API: {api}')
-
-
-
-    # ast1 = AST('/home/iuriim/tmp/qwe/1')
-    # # print(f'============= AST1\n{ast1}')
-    # ast2 = AST('/home/iuriim/tmp/qwe/2')
-    # # print(f'============= AST1\n{ast2}')
-    #
-    # modified_methods_ids = set()
-    # methods1 = ast1.find_methods()
-    # print(f'ZZZ =========== methods1 : {len(methods1)}\n')
-    # methods2 = ast2.find_methods()
-    # print(f'ZZZ =========== methods2 : {len(methods2)}\n')
-    # for m in methods1:
-    #     if m not in methods2:
-    #         print(f'ZZZ =========== m : {m}\n')
-    #         modified_methods_ids.add(m.uid)
-    #
-    # public_api = ['wav_player_start_new', 'wav_player_stop', 'wav_player_start_loop']
-    # for api in public_api:
-    #     if is_method_affected(api, methods1, modified_methods_ids):
-    #         print(f'ZZZ =========================== AFFECTED: {api}')
-    #     else:
-    #         print(f'ZZZ =========================== NOTTTTTT AFFECTED: {api}')
-
-
-
-
-
-
-
-# def call_graph(dot_file_pathname: str) -> dict:
-#     res = dict()
-#     for line in open(dot_file_pathname, 'r').readlines():
-#         groups = re.match(r'^\s+Node(0x[0-9a-fA-F]+)\s+->\s+Node(0x[0-9a-fA-F]+);$', line)
-#         if groups:
-#             res.setdefault(groups.group(1), set()).add(groups.group(2))
-#     return res
-#
-#
-# def is_node_affected(node_id: str, modified_nodes: set, cg: dict) -> bool:
-#     leaves = cg.get(node_id, None)
-#     if leaves:
-#         if leaves.intersection(modified_nodes):
-#             return True
-#         for leaf in leaves:
-#             if is_node_affected(leaf, modified_nodes, cg):
-#                 return True
-#     return False
-
-
 
 
 if __name__ == '__main__':
     main()
+
+
+
+# def is_node_affected(node_id: str, existing_methods: list, modified_methods_ids: set) -> bool:
+#     print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 1: {node_id}')
+#     methods = [m for m in existing_methods if m.uid == node_id]
+#     print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 2: {len(methods)}')
+#     for method in methods:
+#         print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 3: {method.uid}, {method.display_name}, {method.mangled_name}')
+#         if method.display_name == '' or method.mangled_name == '':
+#             continue
+#         nodes = [n for n in existing_methods if n.display_name == method.display_name and n.mangled_name == method.mangled_name]
+#         print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 4: {len(nodes)}')
+#         for nd in nodes:
+#             print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected 5: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+#             if nd.uid in modified_methods_ids:
+#                 print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 1: {nd.uid}, {nd.display_name}, {nd.mangled_name}')
+#                 return True
+#
+#             referenced_nodes_ids = nd.find_referenced_methods()
+#             for uid in referenced_nodes_ids:
+#                 if is_node_affected(uid, existing_methods, modified_methods_ids):
+#                     print(f'ZZZ !!!!!!!!!!!!!!!!!!! is_node_affected OK 2: {uid}')
+#                     return True
+#
+#     return False
+
+
+# def is_method_affected(method_name: str, existing_methods: list, modified_methods_ids: set) -> bool:
+#     method_nodes_ids = {n.uid for n in existing_methods if n.display_name == method_name and n.mangled_name == method_name}
+#     for uid in method_nodes_ids:
+#         if is_node_affected(uid, existing_methods, modified_methods_ids):
+#             return True
+#     return False
+
+
+# def affected_fuzzers(report_file_pathname: str, path_to_ast_files1: str, path_to_ast_files2: str) -> set:
+#     res = set()
+
+    # # find public APIs (linked to fuzzers)
+    # pub_api = public_api(report_file_pathname)
+    # for k, v in pub_api.items():
+    #     print(f'ZZZ === API: {k} : {v}\n')
+    #
+    # # build two ASTs for comparison
+    # ast1 = AST(path_to_ast_files1)
+    # # print(f'ZZZ === AST1\n{ast1}\n')
+    # ast2 = AST(path_to_ast_files2)
+    # # print(f'ZZZ === AST2\n{ast2}\n')
+    #
+    # # find modified methods
+    # modified_methods_ids = set()
+    # methods1 = ast1.find_methods()
+    # print(f'ZZZ === methods1 : {len(methods1)}\n')
+    # methods2 = ast2.find_methods()
+    # print(f'ZZZ === methods2 : {len(methods2)}\n')
+    # for m in methods1:
+    #     if m not in methods2:
+    #         print(f'ZZZ === modified method : {m}\n')
+    #         modified_methods_ids.add(m.uid)
+    # print(f'ZZZ === modified_methods_ids : {modified_methods_ids}\n')
+
+    # # checks is public API affected and get linked fuzzers
+    # for api, fuzzers in pub_api.items():
+    #     print(f'ZZZ === CHECK METHOD: {api}')
+    #     if is_method_affected(api, methods1, modified_methods_ids):
+    #         print(f'ZZZ === METHOD AFFECTED: {api}')
+    #         res.update(fuzzers)
+    #     else:
+    #         print(f'ZZZ === METHOD NOT AFFECTED: {api}')
+
+    # return res
+
+
+
