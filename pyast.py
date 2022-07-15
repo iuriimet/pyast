@@ -3,8 +3,8 @@
 
 import os
 import re
+import gzip
 import json
-import copy
 
 
 class ASTException(Exception):
@@ -27,7 +27,6 @@ class ASTNode:
 
     # method nodes
     method_nodes = ['FunctionDecl', 'CXXConstructorDecl', 'CXXDestructorDecl', 'CXXMethodDecl', 'FunctionTemplateDecl']
-    # 'CXXCtorInitializer'
 
     # keys that are needed to compare nodes
     used_node_keys = ['id', 'kind', 'name', 'mangledName', 'isUsed', 'virtual', 'type', 'valueCategory', 'value',
@@ -62,7 +61,8 @@ class ASTNode:
             #     print(f'ZZZ ========================= {k} : {v}')
 
         # some tuning
-        # 1. in some cases self.params['type'] may be a string containing the path with line/col numbers, for ex:
+
+        # 1. in some cases self.params['type'] may contain strings with path and line/col numbers, for ex:
         # '(lambda at /home/abuild/rpmbuild/BUILD/capi-context-1.0.6/src/trigger/CustomTemplate.cpp:295:3)'
         t = self._params.get('type', None)
         # todo:
@@ -72,6 +72,7 @@ class ASTNode:
         # just remove the whole string
         if t and '/home/abuild/rpmbuild' in t:
             self._params['type'] = ''
+
         # 2. can't explain
         v = self._params.get('value', None)
         if v:
@@ -121,11 +122,9 @@ class ASTNode:
 
     def find_methods(self, display_name: str = None, mangled_name: str = None) -> list:
         res = []
-
-        kind = self.kind
-        if kind in ASTNode.method_nodes:
-            match = True
-            if display_name and display_name != self.display_name:
+        if self.kind in ASTNode.method_nodes:
+            match = True if self.display_name != '' and self.mangled_name != '' else False
+            if match and display_name and display_name != self.display_name:
                 match = False
             if match and mangled_name and mangled_name != self.mangled_name:
                 match = False
@@ -134,7 +133,6 @@ class ASTNode:
         else:
             for leaf in self._leaves:
                 res.extend(leaf.find_methods(display_name, mangled_name))
-
         return res
 
     def find_referenced_methods(self) -> set:
@@ -193,10 +191,11 @@ class AST:
         self.tu = []
         for ast in AST.__ast_files(project_pathname):
             try:
-                with open(ast, encoding="UTF-8") as f:
+                with gzip.open(ast) as f:
                     self.tu.append(ASTTu(ast, json.load(f)))
             except ASTException as e:
                 print(f"Can't parse ast {ast} : {e}")
+                raise
             except Exception as e:
                 print(f"Can't parse ast {ast} : {e}")
                 raise
@@ -217,7 +216,7 @@ class AST:
     def __ast_files(project_pathname: str) -> list:
         res = []
         for root, dirs, files in os.walk(project_pathname):
-            res.extend([os.path.join(root, f) for f in files if re.search(r'.*\.ast.json$', f)])
+            res.extend([os.path.join(root, f) for f in files if re.search(r'.*\.ast.json.gz$', f)])
         return res
 
 
@@ -234,22 +233,27 @@ class AffectedFuzzersFinder:
         methods2 = AST(path_to_ast_files2).find_methods()
         print(f'ZZZ === _existing_methods2 : {len(methods2)}\n')
 
-        # find modified methods
-        self._modified_methods_ids = AffectedFuzzersFinder.__find_modified_methods_ids(methods1, methods2)
-        print(f'ZZZ === modified_methods_ids : {self._modified_methods_ids}\n')
-
+        # filter by id and name
         self._existing_methods_by_id = dict()
         self._existing_methods_by_name = dict()
         for m in methods1:
             self._existing_methods_by_id.setdefault(m.uid, []).append(m)
             self._existing_methods_by_name.setdefault(m.display_name + m.mangled_name, []).append(m)
 
+        # find modified methods
+        existing_methods_by_name = dict()
+        for m in methods2:
+            existing_methods_by_name.setdefault(m.display_name + m.mangled_name, []).append(m)
+        self._modified_methods_ids = \
+            AffectedFuzzersFinder.__find_modified_methods_ids(self._existing_methods_by_name, existing_methods_by_name)
+        print(f'ZZZ === modified_methods_ids : {self._modified_methods_ids}\n')
+
         self._checked_methods = dict()
         self._checked_nodes = dict()
 
     def __call__(self) -> set:
         res = set()
-        # checks is public API affected and get linked fuzzers
+        # check is public API affected and get linked fuzzers
         for api, fuzzers in self._public_api.items():
             print(f'ZZZ === CHECK METHOD: {api}')
             if self._checked_methods.get(api, None) is None:
@@ -260,16 +264,14 @@ class AffectedFuzzersFinder:
         return res
 
     def __is_method_affected(self, method_name: str) -> bool:
-        return self.__is_nodes_affected({n.uid for n in self._existing_methods_by_name[method_name + method_name]})
+        return self.__is_nodes_affected({n.uid for n in self._existing_methods_by_name.get(method_name + method_name, [])})
 
     def __is_nodes_affected(self, nodes_ids: set, stack: set = set()) -> bool:
         for nid in nodes_ids:
             print(f'ZZZ ====== CHECK NODE: {nid}')
-
             if nid in stack:
                 print(f'ZZZ ====== CHECK NODE: {nid} -> SKIP')
                 continue
-
             if self._checked_nodes.get(nid, None) is None:
                 stack.add(nid)
                 self._checked_nodes[nid] = self.__is_node_affected(nid, stack)
@@ -281,8 +283,8 @@ class AffectedFuzzersFinder:
 
     def __is_node_affected(self, node_id: str, stack: set) -> bool:
         for method in self._existing_methods_by_id.get(node_id, []):
-            if method.display_name == '' or method.mangled_name == '':
-                continue
+            assert method.display_name != ''
+            assert method.mangled_name != ''
             for node in self._existing_methods_by_name.get(method.display_name + method.mangled_name, []):
                 if node.uid in self._modified_methods_ids:
                     return True
@@ -296,15 +298,15 @@ class AffectedFuzzersFinder:
         with open(report_file_pathname) as f:
             report = json.load(f)
             for api in report.get('API', []):
-                if api.get('Status', '') != 'GENERATED' or api.get('FuzzerBuildStatus', '') != 'SUCCESS':
-                    continue
+                # if api.get('Status', '') != 'GENERATED' or api.get('FuzzerBuildStatus', '') != 'SUCCESS':
+                #     continue
                 name = api.get('Name', None)
                 if not name:
                     continue
                 fuzzers = []
                 for it in api.get('StatusList', []):
-                    if it.get('Status', '') != 'GENERATED':
-                        continue
+                    # if it.get('Status', '') != 'GENERATED':
+                    #     continue
                     fuzzer = it.get('StatusFromUT', None)
                     if fuzzer:
                         fuzzers.append(f'{fuzzer}_ftgfuzz')
@@ -312,12 +314,14 @@ class AffectedFuzzersFinder:
         return res
 
     @staticmethod
-    def __find_modified_methods_ids(methods1: list, methods2: list) -> set:
+    def __find_modified_methods_ids(methods1: dict, methods2: dict) -> set:
         res = set()
-        for m in methods1:
-            if m not in methods2:
-                print(f'ZZZ === method MODIFIED : {m}\n')
-                res.add(m.uid)
+        for key, m1_val in methods1.items():
+            m2_val = methods2.get(key, [])
+            for m in m1_val:
+                if m not in m2_val:
+                    print(f'ZZZ === method MODIFIED : {m}\n')
+                    res.add(m.uid)
         return res
 
 
